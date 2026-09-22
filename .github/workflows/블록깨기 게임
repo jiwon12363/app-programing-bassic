@@ -1,0 +1,633 @@
+import 'dart:math';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+void main() {
+  runApp(const BreakoutGameApp());
+}
+
+class BreakoutGameApp extends StatelessWidget {
+  const BreakoutGameApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        useMaterial3: true,
+      ),
+      home: const BreakoutGamePage(),
+    );
+  }
+}
+
+class Brick {
+  Brick({
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
+    required this.color,
+  });
+
+  final double x;
+  final double y;
+  final double width;
+  final double height;
+  final Color color;
+  bool alive = true;
+
+  Rect get rect => Rect.fromLTWH(x, y, width, height);
+}
+
+enum ItemType { extraBall, expand, bonus, fast }
+
+class GameItem {
+  GameItem({required this.x, required this.y, required this.type});
+
+  double x;
+  double y;
+  final ItemType type;
+
+  static const double size = 18;
+
+  Rect get rect => Rect.fromLTWH(x - size / 2, y - size / 2, size, size);
+}
+
+class ExtraBall {
+  ExtraBall({
+    required this.x,
+    required this.y,
+    required this.vx,
+    required this.vy,
+  });
+
+  double x;
+  double y;
+  double vx;
+  double vy;
+}
+
+class _BreakoutGamePageState extends State<BreakoutGamePage>
+    with SingleTickerProviderStateMixin {
+  static const double fieldWidth = 360;
+  static const double fieldHeight = 560;
+  static const double paddleWidth = 90;
+  static const double expandedPaddleWidth = 124;
+  static const double paddleHeight = 16;
+  static const double ballRadius = 8;
+
+  final FocusNode _focusNode = FocusNode();
+  late final AnimationController _controller;
+
+  double _paddleX = fieldWidth / 2 - paddleWidth / 2;
+  double _ballX = fieldWidth / 2;
+  double _ballY = fieldHeight - 60;
+  double _ballVX = 2.6;
+  double _ballVY = -3.2;
+  bool _isGameOver = false;
+  bool _isCleared = false;
+  bool _moveLeft = false;
+  bool _moveRight = false;
+  int _score = 0;
+  int _level = 1;
+  int _expandedFrames = 0;
+  int _slowFrames = 0;
+  int _fastFrames = 0;
+
+  List<Brick> _bricks = [];
+  final List<GameItem> _items = [];
+  final List<ExtraBall> _extraBalls = [];
+  final Random _random = Random(7);
+  double _currentPaddleWidth = paddleWidth;
+
+  @override
+  void initState() {
+    super.initState();
+    _buildBricks();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _focusNode.requestFocus();
+      }
+    });
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 35),
+    );
+    _controller.addListener(_updateGame);
+    _controller.repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _handleKeyEvent(KeyEvent event) {
+    final isPressed = event is KeyDownEvent;
+    final isReleased = event is KeyUpEvent;
+    if (!isPressed && !isReleased) return;
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+        event.logicalKey == LogicalKeyboardKey.keyA) {
+      _moveLeft = isPressed;
+      return;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+        event.logicalKey == LogicalKeyboardKey.keyD) {
+      _moveRight = isPressed;
+      return;
+    }
+
+    if (isPressed &&
+        (event.logicalKey == LogicalKeyboardKey.space ||
+            event.logicalKey == LogicalKeyboardKey.enter) &&
+        (_isGameOver || _isCleared)) {
+      _resetGame();
+    }
+  }
+
+  void _movePaddle() {
+    if (_isGameOver || _isCleared) return;
+    final direction = (_moveRight ? 1 : 0) - (_moveLeft ? 1 : 0);
+    _paddleX = (_paddleX + direction * 9).clamp(
+      0.0,
+      fieldWidth - _currentPaddleWidth,
+    );
+  }
+
+  void _buildBricks() {
+    final rows = min(8, 4 + _level);
+    final cols = 6;
+    const brickWidth = 46.0;
+    const brickHeight = 18.0;
+    const gap = 8.0;
+    final left = (fieldWidth - (cols * brickWidth + (cols - 1) * gap)) / 2;
+    const top = 40.0;
+
+    final colors = [
+      const Color(0xFFf87171),
+      const Color(0xFFfbbf24),
+      const Color(0xFF34d399),
+      const Color(0xFF60a5fa),
+      const Color(0xFFc084fc),
+    ];
+
+    final bricks = <Brick>[];
+    for (int row = 0; row < rows; row++) {
+      for (int col = 0; col < cols; col++) {
+        bricks.add(
+          Brick(
+            x: left + col * (brickWidth + gap),
+            y: top + row * (brickHeight + gap),
+            width: brickWidth,
+            height: brickHeight,
+            color: colors[row % colors.length],
+          ),
+        );
+      }
+    }
+
+    setState(() {
+      _bricks = bricks;
+      _items.clear();
+      _extraBalls.clear();
+      _currentPaddleWidth = paddleWidth;
+      _expandedFrames = 0;
+      _slowFrames = 0;
+      _fastFrames = 0;
+      _paddleX = fieldWidth / 2 - _currentPaddleWidth / 2;
+      _ballX = fieldWidth / 2;
+      _ballY = fieldHeight - 60;
+      _ballVX = 3.0 + (_level - 1) * 0.18;
+      _ballVY = -3.7 - (_level - 1) * 0.12;
+      _isCleared = false;
+    });
+  }
+
+  void _resetGame() {
+    _score = 0;
+    _level = 1;
+    _isGameOver = false;
+    _buildBricks();
+    _controller.repeat();
+  }
+
+  void _spawnItem(double x, double y) {
+    if (_items.length >= 3 || _random.nextDouble() > 0.35) return;
+
+    final roll = _random.nextDouble();
+    final type = roll < 0.45
+        ? ItemType.extraBall
+        : roll < 0.65
+        ? ItemType.expand
+        : roll < 0.85
+        ? ItemType.bonus
+        : ItemType.fast;
+    _items.add(GameItem(x: x, y: y, type: type));
+  }
+
+  void _applyItem(ItemType type) {
+    switch (type) {
+      case ItemType.extraBall:
+        if (_extraBalls.length < 2) {
+          _extraBalls.add(
+            ExtraBall(x: _ballX, y: _ballY, vx: -_ballVX, vy: _ballVY),
+          );
+        }
+        break;
+      case ItemType.expand:
+        _currentPaddleWidth = expandedPaddleWidth;
+        _expandedFrames = 300;
+        _paddleX = _paddleX.clamp(0.0, fieldWidth - _currentPaddleWidth);
+        break;
+      case ItemType.bonus:
+        _score += 50;
+        break;
+      case ItemType.fast:
+        _fastFrames = 300;
+        break;
+    }
+  }
+
+  void _updateItems() {
+    final paddleRect = Rect.fromLTWH(
+      _paddleX,
+      fieldHeight - 34,
+      _currentPaddleWidth,
+      paddleHeight,
+    );
+
+    for (int i = _items.length - 1; i >= 0; i--) {
+      final item = _items[i];
+      item.y += 2.2;
+      if (item.rect.overlaps(paddleRect)) {
+        _applyItem(item.type);
+        _items.removeAt(i);
+      } else if (item.y > fieldHeight + GameItem.size) {
+        _items.removeAt(i);
+      }
+    }
+  }
+
+  void _updateExtraBalls(double speedFactor, Rect paddleRect) {
+    final paddleLineY = fieldHeight - 34 + paddleHeight;
+
+    for (int i = _extraBalls.length - 1; i >= 0; i--) {
+      final extraBall = _extraBalls[i];
+      extraBall.x += extraBall.vx * speedFactor;
+      extraBall.y += extraBall.vy * speedFactor;
+
+      if (extraBall.x <= ballRadius) {
+        extraBall.x = ballRadius;
+        extraBall.vx = extraBall.vx.abs();
+      } else if (extraBall.x >= fieldWidth - ballRadius) {
+        extraBall.x = fieldWidth - ballRadius;
+        extraBall.vx = -extraBall.vx.abs();
+      }
+      if (extraBall.y <= ballRadius) {
+        extraBall.y = ballRadius;
+        extraBall.vy = extraBall.vy.abs();
+      } else if (extraBall.y - ballRadius > paddleLineY) {
+        _extraBalls.removeAt(i);
+        continue;
+      }
+
+      final ballRect = Rect.fromCircle(
+        center: Offset(extraBall.x, extraBall.y),
+        radius: ballRadius,
+      );
+      if (ballRect.overlaps(paddleRect) && extraBall.vy > 0) {
+        extraBall.y = fieldHeight - 34 - ballRadius;
+        extraBall.vy = -extraBall.vy.abs();
+      }
+
+      for (final brick in _bricks) {
+        if (!brick.alive || !ballRect.overlaps(brick.rect)) continue;
+        brick.alive = false;
+        _score += 10;
+        _spawnItem(brick.x + brick.width / 2, brick.y + brick.height / 2);
+        extraBall.vy *= -1;
+        break;
+      }
+    }
+  }
+
+  void _updateGame() {
+    if (_isGameOver || _isCleared) {
+      return;
+    }
+
+    if (_expandedFrames > 0) {
+      _expandedFrames--;
+    } else {
+      _currentPaddleWidth = paddleWidth;
+    }
+    if (_slowFrames > 0) _slowFrames--;
+    if (_fastFrames > 0) _fastFrames--;
+
+    final pressedKeys = HardwareKeyboard.instance.logicalKeysPressed;
+    _moveLeft =
+        pressedKeys.contains(LogicalKeyboardKey.arrowLeft) ||
+        pressedKeys.contains(LogicalKeyboardKey.keyA);
+    _moveRight =
+        pressedKeys.contains(LogicalKeyboardKey.arrowRight) ||
+        pressedKeys.contains(LogicalKeyboardKey.keyD);
+    _movePaddle();
+
+    final speedFactor =
+        (_slowFrames > 0 ? 0.72 : 1.0) * (_fastFrames > 0 ? 1.35 : 1.0);
+    _ballX += _ballVX * speedFactor;
+    _ballY += _ballVY * speedFactor;
+
+    if (_ballX <= ballRadius) {
+      _ballX = ballRadius;
+      _ballVX = _ballVX.abs();
+    } else if (_ballX >= fieldWidth - ballRadius) {
+      _ballX = fieldWidth - ballRadius;
+      _ballVX = -_ballVX.abs();
+    }
+
+    if (_ballY <= ballRadius) {
+      _ballY = ballRadius;
+      _ballVY = _ballVY.abs();
+    }
+
+    final paddleRect = Rect.fromLTWH(
+      _paddleX,
+      fieldHeight - 34,
+      _currentPaddleWidth,
+      paddleHeight,
+    );
+    _updateExtraBalls(speedFactor, paddleRect);
+    final ballRect = Rect.fromCircle(
+      center: Offset(_ballX, _ballY),
+      radius: ballRadius,
+    );
+
+    if (ballRect.overlaps(paddleRect) && _ballVY > 0) {
+      _ballY = fieldHeight - 34 - ballRadius;
+      _ballVY = -(_ballVY.abs());
+      final relative =
+          ((_ballX - (_paddleX + _currentPaddleWidth / 2)) /
+          (_currentPaddleWidth / 2));
+      _ballVX = relative * 4.5;
+    }
+
+    final paddleLineY = fieldHeight - 34 + paddleHeight;
+    if (_ballY - ballRadius > paddleLineY) {
+      _isGameOver = true;
+      _controller.stop();
+    }
+
+    for (final brick in _bricks) {
+      if (!brick.alive) continue;
+
+      final brickRect = brick.rect;
+      if (!ballRect.overlaps(brickRect)) continue;
+
+      brick.alive = false;
+      _score += 10;
+      _spawnItem(brick.x + brick.width / 2, brick.y + brick.height / 2);
+
+      final overlapLeft = (_ballX + ballRadius) - brickRect.left;
+      final overlapRight = brickRect.right - (_ballX - ballRadius);
+      final overlapTop = (_ballY + ballRadius) - brickRect.top;
+      final overlapBottom = brickRect.bottom - (_ballY - ballRadius);
+      final minOverlap = [
+        overlapLeft,
+        overlapRight,
+        overlapTop,
+        overlapBottom,
+      ].reduce(min);
+
+      if (minOverlap == overlapLeft || minOverlap == overlapRight) {
+        _ballVX *= -1;
+      } else {
+        _ballVY *= -1;
+      }
+      break;
+    }
+
+    _updateItems();
+
+    if (_bricks.every((brick) => !brick.alive)) {
+      _level++;
+      _score += 100;
+      _buildBricks();
+      return;
+    }
+
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        _handleKeyEvent(event);
+        return KeyEventResult.handled;
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => FocusScope.of(context).requestFocus(_focusNode),
+        child: Scaffold(
+          backgroundColor: const Color(0xFF0F172A),
+          body: SafeArea(
+            child: Center(
+              child: Column(
+                children: [
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Brick Breaker',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Stage $_level   Score: $_score',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: fieldWidth,
+                    height: fieldHeight,
+                    child: Stack(
+                      children: [
+                        CustomPaint(
+                          size: const Size(fieldWidth, fieldHeight),
+                          painter: _GamePainter(
+                            paddleX: _paddleX,
+                            paddleY: fieldHeight - 34,
+                            paddleWidth: _currentPaddleWidth,
+                            paddleHeight: paddleHeight,
+                            ballX: _ballX,
+                            ballY: _ballY,
+                            ballRadius: ballRadius,
+                            bricks: _bricks,
+                            items: _items,
+                            extraBalls: _extraBalls,
+                          ),
+                        ),
+                        if (_isGameOver || _isCleared)
+                          Positioned.fill(
+                            child: Container(
+                              color: Colors.black38,
+                              alignment: Alignment.center,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    _isCleared ? 'CLEAR!' : 'GAME OVER',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 34,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 18),
+                                  ElevatedButton(
+                                    onPressed: _resetGame,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.white,
+                                      foregroundColor: Colors.black,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 28,
+                                        vertical: 12,
+                                      ),
+                                    ),
+                                    child: const Text('다시 시작'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class BreakoutGamePage extends StatefulWidget {
+  const BreakoutGamePage({super.key});
+
+  @override
+  State<BreakoutGamePage> createState() => _BreakoutGamePageState();
+}
+
+class _GamePainter extends CustomPainter {
+  _GamePainter({
+    required this.paddleX,
+    required this.paddleY,
+    required this.paddleWidth,
+    required this.paddleHeight,
+    required this.ballX,
+    required this.ballY,
+    required this.ballRadius,
+    required this.bricks,
+    required this.items,
+    required this.extraBalls,
+  });
+
+  final double paddleX;
+  final double paddleY;
+  final double paddleWidth;
+  final double paddleHeight;
+  final double ballX;
+  final double ballY;
+  final double ballRadius;
+  final List<Brick> bricks;
+  final List<GameItem> items;
+  final List<ExtraBall> extraBalls;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final bg = Paint()..color = const Color(0xFF0F172A);
+    canvas.drawRect(Offset.zero & size, bg);
+
+    final border = Paint()
+      ..color = Colors.white24
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), border);
+
+    for (final brick in bricks) {
+      if (!brick.alive) continue;
+      final paint = Paint()..color = brick.color;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(brick.rect, const Radius.circular(7)),
+        paint,
+      );
+    }
+
+    for (final item in items) {
+      final itemPaint = Paint()..color = _itemColor(item.type);
+      canvas.drawCircle(Offset(item.x, item.y), GameItem.size / 2, itemPaint);
+    }
+
+    final paddlePaint = Paint()..color = Colors.white;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(paddleX, paddleY, paddleWidth, paddleHeight),
+        const Radius.circular(12),
+      ),
+      paddlePaint,
+    );
+
+    final ballPaint = Paint()..color = const Color(0xFF93C5FD);
+    canvas.drawCircle(Offset(ballX, ballY), ballRadius, ballPaint);
+
+    final extraBallPaint = Paint()..color = const Color(0xFF86EFAC);
+    for (final extraBall in extraBalls) {
+      canvas.drawCircle(
+        Offset(extraBall.x, extraBall.y),
+        ballRadius,
+        extraBallPaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _GamePainter oldDelegate) {
+    return oldDelegate.ballX != ballX ||
+        oldDelegate.ballY != ballY ||
+        oldDelegate.paddleX != paddleX ||
+        oldDelegate.bricks != bricks ||
+        oldDelegate.items != items ||
+        oldDelegate.extraBalls != extraBalls;
+  }
+
+  Color _itemColor(ItemType type) {
+    switch (type) {
+      case ItemType.extraBall:
+        return Colors.greenAccent;
+      case ItemType.expand:
+        return Colors.orangeAccent;
+      case ItemType.bonus:
+        return Colors.yellowAccent;
+      case ItemType.fast:
+        return Colors.pinkAccent;
+    }
+  }
+}
